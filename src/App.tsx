@@ -13,6 +13,13 @@ import {
 
 type CourseStatus = "available" | "completed" | "blocked" | "waived";
 type StatusFilter = "all" | CourseStatus;
+type MachineEvent = {
+  id: number;
+  code: string;
+  courseName: string;
+  direction: "forward" | "reverse";
+  affectedIds: string[];
+};
 type IconName =
   | "arrow"
   | "book"
@@ -192,6 +199,10 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [machineEvent, setMachineEvent] = useState<MachineEvent | null>(null);
+  const [recentlyUnlocked, setRecentlyUnlocked] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const requiredCourses = useMemo(
     () => courses.filter((course) => isRequiredForEntry(course, entryTerm)),
@@ -201,37 +212,49 @@ export default function Home() {
     (sum, course) => sum + course.hours,
     0,
   );
-  const completedRegularHours = requiredCourses
-    .filter(
-      (course) => course.kind !== "bloco-optativo" && completed.has(course.id),
-    )
-    .reduce((sum, course) => sum + course.hours, 0);
-  const completedHours = Math.min(
-    requiredTotalHours,
-    completedRegularHours + electiveHours,
-  );
-
-  const isCourseCompleted = (course: Course) => {
+  const isCourseCompletedWith = (course: Course, completedSet: Set<string>) => {
     if (course.id === "OPTATIVA1") return electiveHours >= 360;
     if (course.id === "OPTATIVA2") {
       return electiveHours >= curriculumRules.electiveHours;
     }
-    return completed.has(course.id);
+    return completedSet.has(course.id);
   };
 
-  const prerequisitesMet = (course: Course) => {
+  const completedHoursWith = (completedSet: Set<string>) => {
+    const regularHours = requiredCourses
+      .filter(
+        (course) =>
+          course.kind !== "bloco-optativo" && completedSet.has(course.id),
+      )
+      .reduce((sum, course) => sum + course.hours, 0);
+    return Math.min(requiredTotalHours, regularHours + electiveHours);
+  };
+
+  const prerequisitesMetWith = (course: Course, completedSet: Set<string>) => {
     if (!course.prerequisitePaths?.length) return true;
     return course.prerequisitePaths.some((path) =>
-      path.every((id) => completed.has(id)),
+      path.every((id) => completedSet.has(id)),
     );
   };
 
-  const statusFor = (course: Course): CourseStatus => {
+  const statusForWith = (
+    course: Course,
+    completedSet: Set<string>,
+  ): CourseStatus => {
     if (!isRequiredForEntry(course, entryTerm)) return "waived";
-    if (isCourseCompleted(course)) return "completed";
-    const hoursMet = !course.requiredHours || completedHours >= course.requiredHours;
-    return prerequisitesMet(course) && hoursMet ? "available" : "blocked";
+    if (isCourseCompletedWith(course, completedSet)) return "completed";
+    const hoursMet =
+      !course.requiredHours ||
+      completedHoursWith(completedSet) >= course.requiredHours;
+    return prerequisitesMetWith(course, completedSet) && hoursMet
+      ? "available"
+      : "blocked";
   };
+
+  const completedHours = completedHoursWith(completed);
+  const isCourseCompleted = (course: Course) =>
+    isCourseCompletedWith(course, completed);
+  const statusFor = (course: Course) => statusForWith(course, completed);
 
   useEffect(() => {
     const saved = getInitialProgress();
@@ -268,6 +291,21 @@ export default function Home() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [selectedId]);
 
+  useEffect(() => {
+    if (!machineEvent) return;
+    const timeout = window.setTimeout(() => setMachineEvent(null), 4200);
+    return () => window.clearTimeout(timeout);
+  }, [machineEvent]);
+
+  useEffect(() => {
+    if (!recentlyUnlocked.size) return;
+    const timeout = window.setTimeout(
+      () => setRecentlyUnlocked(new Set()),
+      6200,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [recentlyUnlocked]);
+
   const plannedSemesterFor = (course: Course) =>
     semesterPlan[course.id] ?? course.semester;
 
@@ -275,6 +313,14 @@ export default function Home() {
   const dependentCourses = selectedCourse
     ? courses.filter((course) => prerequisiteIds(course).includes(selectedCourse.id))
     : [];
+  const selectedPrerequisiteIds = useMemo(
+    () => new Set(selectedCourse ? prerequisiteIds(selectedCourse) : []),
+    [selectedCourse],
+  );
+  const selectedDependentIds = useMemo(
+    () => new Set(dependentCourses.map((course) => course.id)),
+    [dependentCourses],
+  );
 
   const relatedIds = useMemo(() => {
     if (!selectedCourse) return new Set<string>();
@@ -333,11 +379,41 @@ export default function Home() {
 
   const toggleCompleted = (course: Course) => {
     if (course.kind === "bloco-optativo" || statusFor(course) === "waived") return;
-    setCompleted((current) => {
-      const next = new Set(current);
-      if (next.has(course.id)) next.delete(course.id);
-      else next.add(course.id);
-      return next;
+    const next = new Set(completed);
+    const direction = next.has(course.id) ? "reverse" : "forward";
+    const availableBefore = new Set(
+      requiredCourses
+        .filter((candidate) => statusForWith(candidate, completed) === "available")
+        .map((candidate) => candidate.id),
+    );
+
+    if (direction === "reverse") next.delete(course.id);
+    else next.add(course.id);
+
+    const availableAfter = new Set(
+      requiredCourses
+        .filter((candidate) => statusForWith(candidate, next) === "available")
+        .map((candidate) => candidate.id),
+    );
+    const affectedIds =
+      direction === "forward"
+        ? [...availableAfter].filter(
+            (id) => id !== course.id && !availableBefore.has(id),
+          )
+        : [...availableBefore].filter(
+            (id) => id !== course.id && !availableAfter.has(id),
+          );
+
+    setCompleted(next);
+    setRecentlyUnlocked(
+      direction === "forward" ? new Set(affectedIds) : new Set(),
+    );
+    setMachineEvent({
+      id: Date.now(),
+      code: course.code,
+      courseName: course.name,
+      direction,
+      affectedIds,
     });
   };
 
@@ -366,12 +442,28 @@ export default function Home() {
   };
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${machineEvent ? " is-powered" : ""}`}>
       <header className="app-header">
-        <div className="hero-mechanics" aria-hidden="true">
-          <span className="orbit orbit-one"><i /></span>
-          <span className="orbit orbit-two"><i /></span>
-          <span className="orbit orbit-three"><i /></span>
+        <div
+          className={`hero-mechanics${machineEvent ? " is-powered" : ""}`}
+          aria-hidden="true"
+        >
+          <svg className="hero-gear gear-one" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="34" />
+            <circle cx="50" cy="50" r="18" />
+            <path d="M50 4v15M50 81v15M4 50h15M81 50h15M17 17l11 11M72 72l11 11M83 17 72 28M28 72 17 83" />
+          </svg>
+          <svg className="hero-gear gear-two" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="34" />
+            <circle cx="50" cy="50" r="18" />
+            <path d="M50 4v15M50 81v15M4 50h15M81 50h15M17 17l11 11M72 72l11 11M83 17 72 28M28 72 17 83" />
+          </svg>
+          <svg className="hero-gear gear-three" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="34" />
+            <circle cx="50" cy="50" r="18" />
+            <path d="M50 4v15M50 81v15M4 50h15M81 50h15M17 17l11 11M72 72l11 11M83 17 72 28M28 72 17 83" />
+          </svg>
+          <span className="energy-shaft"><i /></span>
         </div>
         <div className="header-copy">
           <div className="ca-brand">
@@ -385,12 +477,12 @@ export default function Home() {
             <span className="eyebrow-mark" />
             Matriz 2006.1
             <span className="eyebrow-separator">/</span>
-            jornada interativa
+            motor curricular
           </div>
-          <h1>Monte seu caminho, fase por fase.</h1>
+          <h1>Faça a máquina do curso girar.</h1>
           <p>
-            Cada disciplina concluída movimenta o mapa. Veja o que foi liberado,
-            descubra novas rotas e acompanhe sua jornada pela Mecânica.
+            Cada disciplina concluída transmite energia pelo mapa, aciona novas
+            conexões e libera a próxima parte da sua formação.
           </p>
         </div>
 
@@ -421,10 +513,10 @@ export default function Home() {
         <header>
           <span className="journey-icon"><Icon name="spark" size={17} /></span>
           <div>
-            <small>Sua rota pelo curso</small>
-            <strong id="journey-title">Navegue pelas fases</strong>
+            <small>Sistema de transmissão</small>
+            <strong id="journey-title">O movimento pelas 10 fases</strong>
           </div>
-          <span className="journey-status">Fase em foco: {activePhase}ª</span>
+          <span className="journey-status">Motor na {activePhase}ª fase</span>
         </header>
         <div className="journey-scroll">
           <div
@@ -449,6 +541,52 @@ export default function Home() {
               );
             })}
           </div>
+        </div>
+      </section>
+
+      <section
+        className={`machine-console${machineEvent ? " is-running" : ""}`}
+        aria-live="polite"
+        aria-label="Movimento do currículo"
+      >
+        <div className="machine-drive" aria-hidden="true">
+          <span /><span /><span />
+        </div>
+        <div className="machine-message">
+          <small>
+            {machineEvent
+              ? machineEvent.direction === "forward"
+                ? "Sistema acionado"
+                : "Transmissão recalculada"
+              : "Motor curricular"}
+          </small>
+          <strong>
+            {machineEvent
+              ? `${machineEvent.code} · ${machineEvent.courseName}`
+              : "Marque uma disciplina para movimentar o sistema"}
+          </strong>
+        </div>
+        <div className="transmission-line" aria-hidden="true">
+          <i /><i /><i />
+          {machineEvent && <span className="energy-packet" key={machineEvent.id} />}
+        </div>
+        <div className="machine-output">
+          <strong>
+            {machineEvent
+              ? machineEvent.affectedIds.length
+              : availableCourses.length}
+          </strong>
+          <span>
+            {machineEvent
+              ? machineEvent.direction === "forward"
+                ? machineEvent.affectedIds.length === 1
+                  ? "nova rota liberada"
+                  : "novas rotas liberadas"
+                : machineEvent.affectedIds.length === 1
+                  ? "rota voltou a aguardar"
+                  : "rotas voltaram a aguardar"
+              : "componentes disponíveis agora"}
+          </span>
         </div>
       </section>
 
@@ -555,6 +693,7 @@ export default function Home() {
         <div className="next-courses">
           {availableCourses.slice(0, 4).map((course) => (
             <button
+              className={recentlyUnlocked.has(course.id) ? "is-newly-unlocked" : ""}
               data-area={course.area}
               key={course.id}
               onClick={() => setSelectedId(course.id)}
@@ -669,7 +808,19 @@ export default function Home() {
                         aria-label={`Abrir detalhes de ${course.name}`}
                         className={`course-card status-${status}${
                           isSelected ? " is-selected" : ""
-                        }${isMuted ? " is-muted" : ""}`}
+                        }${isMuted ? " is-muted" : ""}${
+                          selectedPrerequisiteIds.has(course.id)
+                            ? " is-prerequisite"
+                            : ""
+                        }${
+                          selectedDependentIds.has(course.id)
+                            ? " is-dependent"
+                            : ""
+                        }${
+                          recentlyUnlocked.has(course.id)
+                            ? " is-newly-unlocked"
+                            : ""
+                        }`}
                         data-area={course.area}
                         key={course.id}
                         onClick={() => setSelectedId(course.id)}
@@ -734,6 +885,12 @@ export default function Home() {
                           ) : null}
                           {plannedSemesterFor(course) !== course.semester && (
                             <span className="moved-badge">replanejada</span>
+                          )}
+                          {selectedPrerequisiteIds.has(course.id) && (
+                            <span className="flow-role">alimenta a seleção</span>
+                          )}
+                          {selectedDependentIds.has(course.id) && (
+                            <span className="flow-role">recebe esta energia</span>
                           )}
                         </div>
                       </article>
