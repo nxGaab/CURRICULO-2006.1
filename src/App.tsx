@@ -23,7 +23,8 @@ type IconName =
   | "layers"
   | "lock"
   | "reset"
-  | "search";
+  | "search"
+  | "spark";
 
 const STORAGE_KEY = "curriculo-2006-progress-v2";
 const LEGACY_STORAGE_KEY = "curriculo-2006-progress-v1";
@@ -85,6 +86,12 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
       <>
         <circle cx="11" cy="11" r="7" />
         <path d="m20 20-4-4" />
+      </>
+    ),
+    spark: (
+      <>
+        <path d="m12 2 1.4 5.1L18 9l-4.6 1.9L12 16l-1.4-5.1L6 9l4.6-1.9L12 2Z" />
+        <path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z" />
       </>
     ),
   };
@@ -303,6 +310,26 @@ export default function Home() {
     (course) => statusFor(course) === "blocked",
   ).length;
   const waivedCount = courses.length - requiredCourses.length;
+  const phaseStats = semesterNumbers.map((semester) => {
+    const phaseCourses = requiredCourses.filter(
+      (course) => plannedSemesterFor(course) === semester,
+    );
+    return {
+      semester,
+      total: phaseCourses.length,
+      completed: phaseCourses.filter(isCourseCompleted).length,
+    };
+  });
+  const activePhase =
+    phaseStats.find((phase) => phase.completed < phase.total)?.semester ?? 10;
+
+  const jumpToPhase = (semester: number) => {
+    document.getElementById(`phase-${semester}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "start",
+    });
+  };
 
   const toggleCompleted = (course: Course) => {
     if (course.kind === "bloco-optativo" || statusFor(course) === "waived") return;
@@ -341,17 +368,29 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="app-header">
+        <div className="hero-mechanics" aria-hidden="true">
+          <span className="orbit orbit-one"><i /></span>
+          <span className="orbit orbit-two"><i /></span>
+          <span className="orbit orbit-three"><i /></span>
+        </div>
         <div className="header-copy">
+          <div className="ca-brand">
+            <span className="ca-monogram">CA<span>ME</span></span>
+            <span>
+              <strong>Centro Acadêmico</strong>
+              Engenharia Mecânica · UFSC
+            </span>
+          </div>
           <div className="eyebrow">
             <span className="eyebrow-mark" />
-            Engenharia Mecânica
-            <span className="eyebrow-separator">/</span>
             Matriz 2006.1
+            <span className="eyebrow-separator">/</span>
+            jornada interativa
           </div>
-          <h1>Seu currículo, agora navegável.</h1>
+          <h1>Monte seu caminho, fase por fase.</h1>
           <p>
-            Marque o que já concluiu, acompanhe a carga horária real e descubra
-            quais caminhos se abrem a seguir.
+            Cada disciplina concluída movimenta o mapa. Veja o que foi liberado,
+            descubra novas rotas e acompanhe sua jornada pela Mecânica.
           </p>
         </div>
 
@@ -366,7 +405,7 @@ export default function Home() {
             </div>
           </div>
           <div className="progress-copy">
-            <span>Sua jornada</span>
+            <span>Tração da jornada</span>
             <strong>
               {completedHours.toLocaleString("pt-BR")} <small>H/A</small>
             </strong>
@@ -377,6 +416,41 @@ export default function Home() {
           </div>
         </section>
       </header>
+
+      <section className="journey-map" aria-labelledby="journey-title">
+        <header>
+          <span className="journey-icon"><Icon name="spark" size={17} /></span>
+          <div>
+            <small>Sua rota pelo curso</small>
+            <strong id="journey-title">Navegue pelas fases</strong>
+          </div>
+          <span className="journey-status">Fase em foco: {activePhase}ª</span>
+        </header>
+        <div className="journey-scroll">
+          <div
+            className="journey-track"
+            style={{ "--journey-progress": `${progress}%` } as React.CSSProperties}
+          >
+            {phaseStats.map((phase) => {
+              const isDone = phase.total > 0 && phase.completed === phase.total;
+              const isActive = phase.semester === activePhase;
+              return (
+                <button
+                  aria-label={`${phase.semester}ª fase: ${phase.completed} de ${phase.total} componentes concluídos`}
+                  className={`${isDone ? "is-done" : ""}${isActive ? " is-active" : ""}`}
+                  key={phase.semester}
+                  onClick={() => jumpToPhase(phase.semester)}
+                  type="button"
+                >
+                  <span>{isDone ? <Icon name="check" size={15} /> : phase.semester}</span>
+                  <strong>{phase.semester}ª fase</strong>
+                  <small>{phase.completed}/{phase.total}</small>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </section>
 
       <section className="control-panel" aria-label="Controles do currículo">
         <label className="search-field">
@@ -470,7 +544,7 @@ export default function Home() {
         <div className="strip-title">
           <span className="pulse-dot" />
           <div>
-            <small>Próximos passos</small>
+            <small>Liberadas agora</small>
             <strong>
               {availableCourses.length} {availableCourses.length === 1
                 ? "componente disponível"
@@ -480,7 +554,12 @@ export default function Home() {
         </div>
         <div className="next-courses">
           {availableCourses.slice(0, 4).map((course) => (
-            <button key={course.id} onClick={() => setSelectedId(course.id)} type="button">
+            <button
+              data-area={course.area}
+              key={course.id}
+              onClick={() => setSelectedId(course.id)}
+              type="button"
+            >
               <span>{course.code}</span>
               {course.name}
               <Icon name="arrow" size={15} />
@@ -559,7 +638,7 @@ export default function Home() {
               .reduce((sum, course) => sum + course.hours, 0);
 
             return (
-              <section className="semester-column" key={semester}>
+              <section className="semester-column" id={`phase-${semester}`} key={semester}>
                 <header>
                   <div className="semester-number">{String(semester).padStart(2, "0")}</div>
                   <div>
